@@ -1,7 +1,7 @@
 ### RDA-landscape-genetics
 -------------------
 
-This repository gathers code that uses Redundancy Analysis (RDA) to analyze genomic data in a landscape genetics context.
+This repository gathers code that uses Redundancy Analysis (RDA) to analyze genomic data in a landscape genomics context.
 
 1. RDA_landscape_genomics.html is a tutorial of the various RDA-based approaches reviwed in XX (DOI: XX)
 

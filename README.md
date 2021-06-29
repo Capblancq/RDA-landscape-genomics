@@ -7,4 +7,4 @@ This repository provides code and explanation associated with a review of the di
 
 2. RDA_landscape_genomics.R is the R script used to conduct analyses and produce figures
 
-*Note:* To access the html and R files, click the "Code" button at the upper right and select "Download ZIP".
+#Note:# To access the html and R files, click the "Code" button at the upper right and select "Download ZIP".

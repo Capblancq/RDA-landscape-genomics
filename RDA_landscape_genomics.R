@@ -27,7 +27,7 @@ library(cowplot)
 library(corrplot)
 
 # Set working directory
-setwd("~/Documents/Project-RDA/Analyses/Pinus_contorta/")
+setwd("./")
 
 ##########################################################################################
 ###################################### DATA ##############################################

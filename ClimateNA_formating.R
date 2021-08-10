@@ -15,7 +15,7 @@ library(raster)
 library(rgdal)
 
 # Set working directory
-setwd("~/Documents/Project-RDA/Analyses/Pinus_contorta/Data/ClimateNA/")
+setwd("./Data/")
 
 
 ##############################

@@ -9,6 +9,6 @@ This repository provides code and explanation associated with a review of the di
 
 3. *"RDA_landscape_genomics.R"* is the R script used to conduct analyses and produce figures
 
-4. The *"src"* directory contains various functions used in RDA_landscape_genomics.R
+4. The *"src"* directory contains various functions used in the script RDA_landscape_genomics.R
 
 **Reminder:** To access the html and R files, click the "Code" button at the upper right and select "Download ZIP".

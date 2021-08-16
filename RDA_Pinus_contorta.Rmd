@@ -314,8 +314,8 @@ For our analyses we focused on the geographic area occupied by lodgepole pine an
 ## Administrative boundaries
 admin <- ne_countries(scale = "medium", returnclass = "sf")
 
-## Species range
-range <- readOGR("./Data/pinucon/pinucont.shp") # the shapefile can be found here: https://sites.ualberta.ca/~ahamann/data/rangemaps.html
+## Species range (the shapefile can be downloaded here: https://sites.ualberta.ca/~ahamann/data/rangemaps.html)
+range <- readOGR("./Data/pinucon/pinucont.shp") 
 crs(range) <- '+proj=moll +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs'
 ```
 <br>  

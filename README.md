@@ -11,6 +11,6 @@ This repository provides code and explanation associated with a review of the di
 
 4. The *"src"* directory contains various functions used in the script RDA_landscape_genomics.R
 
-5. The *"Data"* directory contains the list of outliers identified in Mahony et al. (2020) and a table with values of the different Climate NA variables for the Vancouver common garden site in 2015, 2016, 2017 and 2018.
+5. The *"Data"* directory contains the list of outliers identified in Mahony et al. (2020) and a table with values of the different Climate NA variables for the Vancouver common garden site in 2012, 2013, 2014 and 2015.
 
 **Reminder:** To access the html and R files, click the "Code" button at the upper right and select "Download ZIP".

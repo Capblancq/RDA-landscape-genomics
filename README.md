@@ -1,4 +1,4 @@
-### RDA-landscape-genomics
+### RDA applications in landscape genomics
 -------------------
 
 This repository provides code and explanation associated with a review of the different applications of RDA in the field of landscape genomics written by Thibaut Capblancq & Brenna Forester (2021). Redundancy Analysis (RDA): a Swiss-army knife for landscape genomics. (DOI: XX)

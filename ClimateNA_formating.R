@@ -21,7 +21,7 @@ setwd("./Data/")
 ##############################
 ####   Period 1961-1990   ####
 
-# Load 33 Climate NA bioclimatic variables downloaded here: https://adaptwest.databasin.org/pages/adaptwest-climatena/
+# Load 33 Climate NA bioclimatic variables downloaded as a zipfile here: https://adaptwest.databasin.org/pages/adaptwest-climatena/
 ras_past <- stack(lapply(lapply(list.files("./NA_NORM_6190_Bioclim_ASCII/", pattern = ".asc$", full.names = T), read.asciigrid), raster))
 names(ras_past) <- unlist(strsplit(unlist(lapply(strsplit(list.files("./NA_NORM_6190_Bioclim_ASCII", pattern = ".asc$", full.names = T), split = "./NA_NORM_6190_Bioclim_ASCII/"), function(x) x[2])), split = ".asc"))
 
@@ -50,7 +50,7 @@ rm(list = ls())
 ##############################
 ####   Predictions 2050   ####
 
-# Load Climate NA bioclimatic variables predicted for 2050 using RCP8.5 climate scenario and the ensemble projection of 15 CMIP 5 AOGCMs
+# Load Climate NA bioclimatic variables predicted for 2050 using RCP8.5 climate scenario and the ensemble projection of 15 CMIP 5 AOGCMs, in ASCII format
 # The rasters can be downloaded here: https://adaptwest.databasin.org/pages/adaptwest-climatena-cmip5/
 ras_2050 <- stack(lapply(lapply(list.files("./NA_ENSEMBLE_rcp85_2050s_Bioclim_ASCII/", pattern = ".asc$", full.names = T), read.asciigrid), raster))
 names(ras_2050) <- unlist(strsplit(unlist(lapply(strsplit(list.files("./NA_ENSEMBLE_rcp85_2050s_Bioclim_ASCII", pattern = ".asc$", full.names = T), split = "./NA_ENSEMBLE_rcp85_2050s_Bioclim_ASCII/"), function(x) x[2])), split = ".asc"))
@@ -80,7 +80,7 @@ rm(list = ls())
 ##############################
 ####   Predictions 2080   ####
 
-# Load Climate NA bioclimatic variables predicted for 2080 using RCP8.5 climate scenario and the ensemble projection of 15 CMIP 5 AOGCMs
+# Load Climate NA bioclimatic variables predicted for 2080 using RCP8.5 climate scenario and the ensemble projection of 15 CMIP 5 AOGCMs, in ASCII format
 # The rasters can be downloaded here: https://adaptwest.databasin.org/pages/adaptwest-climatena-cmip5/
 ras_2080 <- stack(lapply(lapply(list.files("./NA_ENSEMBLE_rcp85_2080s_Bioclim_ASCII/", pattern = ".asc$", full.names = T), read.asciigrid), raster))
 names(ras_2080) <- unlist(strsplit(unlist(lapply(strsplit(list.files("./NA_ENSEMBLE_rcp85_2080s_Bioclim_ASCII", pattern = ".asc$", full.names = T), split = "./NA_ENSEMBLE_rcp85_2080s_Bioclim_ASCII/"), function(x) x[2])), split = ".asc"))

@@ -7,7 +7,7 @@ This repository provides code and explanation associated with a review of the di
 
 2. *"RDA_landscape_genomics.html"* is a tutorial of the various RDA-based approaches reviewed
 
-3. *"RDA_landscape_genomics.Rmd"* is the Rmd script used to produce the html tutorial
+3. *"RDA_landscape_genomics.Rmd"* is the Rmd script used to produce the html tutorial and which can be used to find the raw code used to produce all the results of the study
 
 4. The *"src"* directory contains various functions used in the script RDA_landscape_genomics.R
 

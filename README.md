@@ -9,7 +9,7 @@ This repository provides code and explanation associated with a review of the di
 
 3. The *"src"* directory contains various functions used in the script RDA_landscape_genomics.R
 
-4. The *"Data"* directory contains the list of outliers identified in Mahony et al. (2020) and a table with values of the different Climate NA variables for the Vancouver common garden site in 2012, 2013, 2014 and 2015. The other data needed to run the code and reproduce the results of the study can be downloaded directly from Climate NA (http://climatena.ca) for the different climate rasters and from dryad (https://datadryad.org/stash/dataset/doi:10.5061/dryad.56j8vq8) for the genotype datasets and their associated metadata published in Mahony et al. (2020).
+4. The *"Data"* directory contains the list of outliers identified in Mahony et al. (2020) and a table with values of the different Climate NA variables for the Vancouver common garden site in 2012, 2013, 2014 and 2015. The other data needed to run the code and reproduce the results of the study can be downloaded directly from Climate NA (http://climatena.ca) for the different climate rasters and from dryad (https://datadryad.org/stash/dataset/doi:10.5061/dryad.56j8vq8) for the genotype datasets published in Mahony et al. (2020) and their associated metadata.
 
 5. *"ClimateNA_formatting.R"* is a script used to re-project Climate NA bioclimate rasters into WGS84 coordinate system
 

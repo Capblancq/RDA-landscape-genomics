@@ -1,0 +1,742 @@
+---
+title: "RDA applications in landscape genomics"
+author: "Thibaut Capblancq & Brenna Forester"
+date: "Glorious year of 2021"
+output:
+  html_document:
+    theme: sandstone
+    highlight: tango
+    fig_caption: true
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+<br>  
+
+This tutorial provides code and explanation associated with a review of the different applications of RDA in the field of landscape genomics written by Thibaut Capblancq & Brenna Forester (2021) Redundancy Analysis (RDA): a Swiss-army knife for landscape genomics.  
+
+To reproduce the different results and figures of this tutorial you will need to place all of the following datasets into a folder called "Data":
+
+* Genetic data and metadata from Mahony et al. 2019, available [here](https://datadryad.org/stash/dataset/doi:10.5061/dryad.56j8vq8). This includes the following files:
+    + Information on individuals and populations: Pine_TotemField_AllNaturalIndivResiduals_Jan20th2017.csv
+    + Genetic matrix for 32,407 SNPs in genic regions: Pine_AllNatural_GCandTotemIndivs_GWAS_SNPs_June8th2019.txt
+    + Genetic matrix of 3,934 SNPs in intergenic regions: Pine_AllNatural_GCandTotemIndivs_ControlSNPs_June8th2019.txt
+    + Geographic coordinates of sampled source populations: PlSeedlots.csv
+
+* Climate data from [ClimateNA](http://climatena.ca), projected in WGS84 coordinate projection. Instructions for downloading and code for formatting the climate data are available in the ClimateNA_formatting.R code provided in the [Github repository](https://github.com/Capblancq/RDA-landscape-genomics).
+
+* The following two files available in the Data folder of the [Github repository](https://github.com/Capblancq/RDA-landscape-genomics).
+    + The values of the nine retained climatic variables (MAR, EMT, MWMT, CMD, Tave_wt, DD_18, MAP, Eref, PAS) in 2012, 2013, 2014 and 2015 at the Vancouver common garden site (latitude = 49.253, longitude = -123.25): ClimateData_VancouverGarden.csv
+    + The previously identified outliers by Mahony et al. 2020: gea_outliers_by_env_Mahonyetal2020.txt
+    
+* The lodgepole pine species range shapefile, available [here](https://sites.ualberta.ca/~ahamann/data/rangemaps.html): *Pinus contorta*, [pinucon.zip](https://sites.ualberta.ca/~ahamann/data/bcspeciesrangemaps/pinucon.zip) 
+
+<br>  
+
+
+<h4>Required libraries</h4>
+```{r, message=FALSE, results='hide', eval=TRUE}
+library(pegas)
+library(ggplot2)
+library(raster)
+library(rgdal)
+library(LEA)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(RColorBrewer)
+library(ggpubr)
+library(vegan)
+library(qvalue)
+library(robust)
+library(WMDB)
+library(ggVennDiagram)
+library(cowplot)
+library(corrplot)
+library(rgeos)
+```
+<br>  
+
+<h2>1. Loading and formatting data</h2>  
+<br>  
+
+<h4>1.1. Genetic dataset</h4>  
+
+The genomic data used to search for adaptive loci consisted of 32,407 SNPs genotyped using the AdapTree project lodgepole pine 50K SNP array ([Mahony et al. 2020](https://onlinelibrary.wiley.com/doi/full/10.1111/eva.12871)). 
+
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Loading genetic dataset
+Genotypes <- read.table("./Data/Pine_AllNatural_GCandTotemIndivs_GWAS_SNPs_June8th2019.txt", header = T)
+```
+```{r, message=FALSE, warning=FALSE, eval=TRUE, echo=FALSE}
+Genotypes[1:5,1:5]
+```
+
+We need to convert the genotypes to numeric in order to run RDA. To do so, we will code the count of the minor allele: 0 represents an individual homozygous for the major allele, 1 represents a heterozygote, and 2 is homozygous for the alternative allele.  
+
+**Note:** Switching major and minor allele does not affect the RDA-based analyses described below.  
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Function to transform the alleles into counts
+genotypes2geno <- function(vec) {
+  vec <- as.character(vec)
+  lev <- levels(as.factor(vec))[-which(levels(as.factor(vec))=="00")]
+  vec[vec==lev[1]] <- 0
+  vec[vec==lev[2]] <- 1
+  vec[vec==lev[3]] <- 2
+  vec[vec=="00"] <- NA
+  return(as.integer(vec))
+}
+
+## Running the function on the lodgepole pine dataset 
+names_ind <- row.names(Genotypes)
+Genotypes <- as.data.frame(apply(Genotypes, 2, genotypes2geno))
+row.names(Genotypes) <- names_ind
+```
+```{r, message=FALSE, warning=FALSE, eval=TRUE, echo=FALSE}
+Genotypes[1:5,1:5]
+```
+
+The lodgepole pine genetic matrix included individuals that are not part of the common garden experiment. We therefore subset to only those individuals that match the metadata.  
+
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Loading samples metadata
+InfoInd <- read.table("./Data/Pine_TotemField_AllNaturalIndivResiduals_Jan20th2017.csv", sep = ",", header = T)
+Genotypes <- Genotypes[match(InfoInd$Internal_ID, row.names(Genotypes), nomatch = 0),]
+```
+
+An RDA model can either be conducted with individual-based genotypes (0, 1, 2 format) or population-based allele frequencies (ranging from 0 to 1). We decided here to work with allele frequencies for the main reason that several individuals were genotyped at each sampling site (i.e., source population) and experienced the exact same climatic conditions. Plus, the sample sizes varied across populations.
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Estimating population allele frequencies
+AllFreq <- aggregate(Genotypes, by = list(InfoInd$ProvSeedlotCode), function(x) mean(x, na.rm = T)/2)
+row.names(AllFreq) <- as.character(AllFreq$Group.1)
+```
+
+RDA does not allow for any missing data in the response or predictor matrices. Here, we start by removing loci with missing data for more than 12/281 populations...  
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+na_pop <- apply(AllFreq[,-1], 2, function(x) sum(is.na(x)))
+AllFreq <- AllFreq[,(which(na_pop<12)+1)]
+```
+
+...and then imputed the remaining missing data with the median of the locus allele frequencies across all 281 populations. More sophisticated methods exist for imputation, but using the median or the mean (mean not advised for individual-based data) to impute missing genotypes is a common practice when conducting ordination methods.  
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+for (i in 1:ncol(AllFreq))
+{
+  AllFreq[which(is.na(AllFreq[,i])),i] <- median(AllFreq[-which(is.na(AllFreq[,i])),i], na.rm=TRUE)
+}
+```
+
+SNPs with a minor allele frequency inferior to 5% were filtered out to avoid giving too much importance to rare alleles when looking for loci associated with environmental variation. Doing so means assuming that local adaptation is driven by consequent changes in adaptive allele frequency along environmental gradients.  
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Filtering on MAF
+freq_mean <- colMeans(AllFreq)
+AllFreq <- AllFreq[,-which(freq_mean>=0.95 | freq_mean<=0.05)]
+
+## Ordering loci based on their scaffold
+AllFreq <- AllFreq[,order(colnames(AllFreq))]
+```
+```{r, message=FALSE, warning=FALSE, eval=TRUE, echo=FALSE}
+AllFreq[1:5,1:5]
+```
+
+The final genetic matrix included allele frequencies for 281 populations (rows) and 29,941 loci (columns).  
+<br>  
+
+<h4>1.2. Climatic variables</h4>  
+
+The values of 27 bioclimate variables were extracted for all 281 populations from the [ClimateNA database](http://www.climatena.ca) for the period 1961-1990, and projections for 2050 and 2080. The projections are based on an [ensemble of 15 AOGCMs using CMIP5](https://adaptwest.databasin.org/pages/adaptwest-climatena-cmip5/). We had to re-project the rasters into the WGS84 reference coordinate system; see our R code ClimateNA_formating.R if you want/need to do the same.
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Loading the climatic rasters
+ras <- stack(list.files("./Data/ClimateNA/", pattern = ".img$", full.names = T))
+names(ras) <- unlist(strsplit(unlist(lapply(strsplit(list.files("./Data/ClimateNA/", pattern = ".img$", full.names = T), split = "./Data/ClimateNA//"), function(x) x[2])), split = ".img"))
+
+ras_6190 <- ras[[grep("6190", names(ras))]]
+names(ras_6190) <- unlist(strsplit(names(ras_6190), split = "_6190"))
+ras_2050 <- ras[[grep("2050_85", names(ras))]]
+names(ras_2050) <- unlist(strsplit(names(ras_2050), split = "_2050_85"))
+ras_2080 <- ras[[grep("2080_85", names(ras))]]
+names(ras_2080) <- unlist(strsplit(names(ras_2080), split = "_2080_85"))
+```
+
+A perfect match between non missing pixels in the different climatic rasters is required to facilitate some of the following analyses. To homogenize the different time periods we use the [remove.NAs.stack](https://rdrr.io/github/paleocore-lab/PaleoCore/src/R/remove.NAs.stack.R) function.  
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+remove.NAs.stack<-function(rast.stack){
+  nom<-names(rast.stack)
+  test1<-calc(rast.stack, fun=sum)
+  test1[!is.na(test1)]<-1
+  test2<-rast.stack*test1
+  test2<-stack(test2)
+  names(test2)<-nom
+  return(test2)
+}
+ras_6190 <- remove.NAs.stack(ras_6190)
+ras_2050 <- remove.NAs.stack(ras_2050)
+ras_2080 <- remove.NAs.stack(ras_2080)
+```
+
+The geographic coordinates of each source population are accessible in the PlSeedlots.csv file.   
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Source populations coordinates
+Coordinates <- read.table("./Data/PlSeedlots.csv", sep = ",", header = T, row.names = 1)
+Coordinates <- Coordinates[match(row.names(AllFreq), Coordinates$id2, nomatch = 0),]
+colnames(Coordinates) <- c("Population", "Latitude", "Longitude", "Elevation")
+```
+```{r, message=FALSE, warning=FALSE, eval=TRUE, echo=FALSE}
+Coordinates[1:5,]
+```
+
+The coordinates were then used to extract climatic data for each pixel/site from the 27 climatic rasters.   
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Extracting environmental values for each source population
+Env <- data.frame(extract(ras_6190, Coordinates[,3:2]))
+```
+```{r, message=FALSE, warning=FALSE, eval=TRUE, echo=FALSE}
+Env[1:5,1:8]
+```
+
+Finally, we standardized the climatic variables to avoid discrepancy in mean and standard deviation among variables and ensure that the variable units were comparable (e.g., precipitation in mm and temperature in °C). Note that RDA analyses can include qualitative predictors such as soil type using binary ("dummy variable") coding. 
+
+**Note:** We have to keep the scaling parameters (i.e., center and scale) to scale present and future climatic data the same way in sections 5 and 6. 
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Standardization of the variables
+Env <- scale(Env, center=TRUE, scale=TRUE) # center=TRUE, scale=TRUE are the defaults for scale()
+
+## Recovering scaling coefficients
+scale_env <- attr(Env, 'scaled:scale')
+center_env <- attr(Env, 'scaled:center')
+
+## Climatic table
+Env <- as.data.frame(Env)
+row.names(Env) <- c(Coordinates$Population)
+```
+```{r, message=FALSE, warning=FALSE, eval=TRUE, echo=FALSE}
+Env[1:5,1:8]
+```
+<br>  
+
+<h4>1.3. Phenotypic traits</h4>  
+
+The phenotypic data included seedling height and average growth rate measured after three growing seasons (MacLachlan et al. 2017). These data were part of the metadata loaded earlier in this tutorial.
+
+**Note:** Experimental effects were already removed from the phenotypic data using the Best Linear Unbiased Predictions (BLUPs) of a linear mixed model that included block and location within block as random effects (Mahony et al. 2020).
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Estimating mean trait value per population
+traits <- aggregate(InfoInd[,19:24], by = list(InfoInd$ProvSeedlotCode), function(x) mean(x, na.rm = T))
+traits <- as.data.frame(scale(traits[match(Coordinates$Population, traits$Group.1, nomatch = 0),-1]))
+colnames(traits) <- c("Height","GthRate","ShootDryMass","Gth5pct","Gth95pct","ColdInjury")
+```
+```{r, message=FALSE, warning=FALSE, eval=TRUE, echo=FALSE}
+traits[1:5,1:6]
+```
+<br>  
+
+<h4>1.4. Inferring population structure</h4>  
+
+To account for population structure in some of the following RDA-based procedures we conducted a principal component analysis (PCA) on the set of 3,934 intergenic SNPs and retained the first three PCs as proxy of population evolutionary history. 
+
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Loading the intergenic SNPs dataset
+Neutral <- read.table("./Data/Pine_AllNatural_GCandTotemIndivs_ControlSNPs_June8th2019.txt", header = T)
+names_ind_neutral <- row.names(Neutral)
+
+## Formatting genotypes
+Neutral <- as.data.frame(apply(Neutral, 2, genotypes2geno))
+row.names(Neutral) <- names_ind_neutral
+
+## Sorting genetic data
+Neutral <- Neutral[match(InfoInd$Internal_ID, row.names(Neutral), nomatch = 0),]
+
+## Estimating allele frequencies for each source population
+AllFreq_neutral <- aggregate(Neutral, by = list(InfoInd$ProvSeedlotCode), function(x) mean(x, na.rm = T)/2)
+
+## Imputation of missing population frequencies by the median across the complete sampling
+for (i in 2:ncol(AllFreq_neutral))
+{
+  AllFreq_neutral[which(is.na(AllFreq_neutral[,i])),i] <- median(AllFreq_neutral[-which(is.na(AllFreq_neutral[,i])),i], na.rm=TRUE)
+}
+AllFreq_neutral[,-1] <- AllFreq_neutral[,-1][,-which(is.na(colMeans(AllFreq_neutral[,-1])))]
+```
+
+**Note:** No filtering on MAF was applied here because small genetic variations are expected to be involved in differentiating neutral genetic groups.  
+
+The PCA was then conducted on this neutral genetic matrix.  
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Running a PCA on neutral genetic markers
+pca <- rda(AllFreq_neutral[,-1], scale=T) # PCA in vegan uses the rda() call without any predictors
+```
+
+Screeplot of the PCA eigenvalues:
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+screeplot(pca, type = "barplot", npcs=10, main="PCA Eigenvalues")
+```
+
+Based on the screeplot, two or three PCs would be a reasonable set to retain as a proxy for neutral population structure in downstream analyses. In this case, we decided to keep the first three PCs.  
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Neutral population structure table
+PCs <- scores(pca, choices=c(1:3), display="sites", scaling=0)
+PopStruct <- data.frame(Population = AllFreq_neutral[,1], PCs)
+colnames(PopStruct) <- c("Population", "PC1", "PC2", "PC3")
+```
+```{r, message=FALSE, warning=FALSE, eval=TRUE, echo=FALSE}
+PopStruct[1:5,]
+```
+<br>  
+
+<h4>1.5. Merging all variables into a single table + loading mapping features</h4>  
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Table gathering all variables
+Variables <- data.frame(Coordinates, PopStruct[,-1], Env, traits)
+```
+```{r, message=FALSE, warning=FALSE, eval=TRUE, echo=FALSE}
+Variables[1:5,]
+```
+
+For our analyses we focused on the geographic area occupied by lodgepole pine and used the species range to mask our projections.    
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+## Administrative boundaries
+admin <- ne_countries(scale = "medium", returnclass = "sf")
+
+## Species range shapefile (download information at beginning of tutorial)
+range <- readOGR("./Data/pinucon/pinucont.shp") 
+crs(range) <- '+proj=moll +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs'
+```
+<br>  
+
+<h2>2. Variable selection: forward model building procedure</h2>  
+<br>  
+
+Forward selection starts from a "null" model where the response is explained only by an intercept. Variables are then added to the model one by one to try to reach the amount of variance explained by a "full" model (i.e., model including all the explanatory variables), while limiting the amount of redundancy among included variables.    
+
+```{r, message=FALSE, results='hide', eval=TRUE}
+## Null model
+RDA0 <- rda(AllFreq ~ 1,  Variables) 
+
+## Full model
+RDAfull <- rda(AllFreq ~ AHM + bFFP + CMD + DD_0 + DD_18 + DD18 + DD5 + eFFP + EMT + Eref + EXT + FFP + MAP + MAR + MAT + MCMT + MSP + MWMT + NFFD + PAS + PPT_sm + PPT_wt + RH + SHM + Tave_sm + Tave_wt + TD, Variables)
+```
+
+To conduct the selection procedure we used the ordiR2step function of the package vegan and the following stopping criteria: variable significance of p < 0.01 using 1000 permutations, and the adjusted R2 of the global model.  
+
+```{r, message=FALSE, results='hide', eval=TRUE}
+## Stepwise procedure with ordiR2step function
+mod <- ordiR2step(RDA0, RDAfull, Pin = 0.01, R2permutations = 1000, R2scope = T)
+```
+```{r, message=FALSE, eval=TRUE, echo=FALSE}
+mod$anova
+```
+
+In total, nine of the 27 bioclimate variables were selected: MAR, EMT, MWMT, CMD, Tave_wt, DD_18, MAP, Eref and PAS. 
+
+**Notes on interpretation and best practices:** We remind users that this predictive approach to variable selection optimizes the variance explained, but does not necessarily identify the ecological or mechanistic drivers of genetic variation. Additionally, pairwise predictor correlations can be very high, e.g., among seasonal calculations of temperature or precipitation. While one variable may maximize variance explained, it may be another, correlated variable, potentially even unmeasured, that is the mechanistic driver of variation. The ubiquitous nature of environmental correlation means that it is critical to carefully investigate selected variables but also avoid overinterpretation of variable importance in downstream analyses unless mechanistic data support observed relationships. 
+
+<br>  
+
+<h2>3. Variance partitioning: disentangling the drivers of genetic variation</h2>  
+<br>  
+
+Variance partitioning with partial RDA (pRDA) can identify the contribution of different factors to reducing gene flow and triggering genetic divergence among populations. We apply pRDA-based variance partitioning to the lodgepole pine data to decompose the contribution of climate, neutral population structure, and geography in explaining genetic variation. We used three sets of variables: 1) the nine selected bioclimate variables (‘clim’); 2) three proxies of neutral genetic structure (population scores along the first three axes of a genetic PCA conducted on the 3,934 neutral loci; ‘struct’); and 3) population coordinates (longitude and latitude) to characterize geographic variation (‘geog’).    
+
+```{r, message=TRUE, echo=TRUE, eval=TRUE}
+## Full model
+pRDAfull <- rda(AllFreq ~ PC1 + PC2 + PC3 + Longitude + Latitude + MAR + EMT + MWMT + CMD + Tave_wt + DD_18 + MAP + Eref + PAS,  Variables)
+RsquareAdj(pRDAfull)
+anova(pRDAfull)
+```
+```{r, message=TRUE, echo=TRUE, eval=TRUE}
+## Pure climate model
+pRDAclim <- rda(AllFreq ~ MAR + EMT + MWMT + CMD + Tave_wt + DD_18 + MAP + Eref + PAS + Condition(Longitude + Latitude + PC1 + PC2 + PC3),  Variables)
+RsquareAdj(pRDAclim)
+anova(pRDAclim)
+```
+```{r, message=TRUE, echo=TRUE, eval=TRUE}
+## Pure neutral population structure model  
+pRDAstruct <- rda(AllFreq ~ PC1 + PC2 + PC3 + Condition(Longitude + Latitude + MAR + EMT + MWMT + CMD + Tave_wt + DD_18 + MAP + Eref + PAS),  Variables)
+RsquareAdj(pRDAstruct)
+anova(pRDAstruct)
+```
+```{r, message=TRUE, echo=TRUE, eval=TRUE}
+##Pure geography model 
+pRDAgeog <- rda(AllFreq ~ Longitude + Latitude + Condition(MAR + EMT + MWMT + CMD + Tave_wt + DD_18 + MAP + Eref + PAS + PC1 + PC2 + PC3),  Variables)
+RsquareAdj(pRDAgeog)
+anova(pRDAgeog)
+```
+
+To replicate Table 2 in the manuscript, we extract the following from the above results:
+
+  * Total inertia (aka variance)
+  * Constrained inertia
+  * Proportion of variance explained by constraints
+  * Model R^2^
+  * Model p-value
+
+**Note:** It is interesting to look at the degree of correlation among variables using a correlogram:
+<br>  
+
+```{r, message=TRUE, eval=TRUE, echo=FALSE, fig.align='center'}
+corrplot(cor(Variables[, c("PC1","PC2","PC3","Longitude","Latitude","MAR","EMT","MWMT","CMD","Tave_wt","DD_18","MAP","Eref","PAS")]), type="upper")
+```
+<br>  
+
+**Notes on interpretation and best practices:** In this case, the largest proportion of genetic variance could not be uniquely attributed to any of the three sets of predictors, a common occurrence given the ubiquitous nature of spatial autocorrelation in environmental and genetic data sets. This confounded effect reflects a high degree of collinearity among explanatory variables. This is critical information given that most landscape genomic studies look for correlation between climatic and genetic variation (i.e., GEA) and either assume no collinearity or, on the contrary, totally remove this commonly explained variation. In the first case, GEA detections could potentially be subject to high false positive rates, while in the latter case detections might show high false negative rates. Selecting an appropriate approach to account for demographic history and geographic distance is of major importance when searching for selection in the genome. Variance partitioning can be a useful step to explore the (statistical) association among available descriptors, to better understand the covariation of environmental and genetic gradients, and to determine how much overall genetic variation is shaped by environmental, geographic, and demographic factors before conducting further landscape genomics study.
+
+
+<h2>4. Genotype-Environment Associations: identifying loci under selection</h2>  
+<br>  
+
+We used a pRDA to identify candidate adaptive markers in the lodgepole pine data using population allele frequencies for the 29,941 loci as response and the 9 selected bioclimate variables as predictors. We followed the procedure described in Capblancq et al. (2018) where outliers are identified based on their extremeness along a distribution of Mahalanobis distances estimated between each locus and the center of the RDA space using a certain number of axes (K).
+
+Another option for identifying RDA outliers is to search for extreme loadings on each retained axis (e.g., Forester et al., 2018; [vignette and code](https://popgen.nescent.org/2018-03-27_RDA_GEA.html)).   
+
+<h4>4.1 Conducting the genome scan using pRDA</h4>  
+
+The first step was to run an RDA model on the allele frequency matrix using the 9 retained climatic factors as explanatory variables and the first three PCs as conditioning variables to account for neutral population structure.  
+
+```{r, message=FALSE, results='hide', eval=TRUE}
+RDA_env <- rda(AllFreq ~ MAR + EMT + MWMT + CMD + Tave_wt + DD_18 + MAP + Eref + PAS + Condition(PC1 + PC2 + PC3),  Variables)
+```
+
+We then had to choose a number of RDA axes to include when conducting the genome scan.  
+
+```{r, message=FALSE, results='hide', eval=TRUE, fig.align='center'}
+screeplot(RDA_env, main="Eigenvalues of constrained axes")
+```
+
+Looking at the proportion of variance explained by each axis, we decided to use the first two axes in this demonstration, though retaining just the first axis, or axes 1-3 would be other reasonable choices. If selecting only one axis, the [axis-based approach](https://popgen.nescent.org/2018-03-27_RDA_GEA.html) mentioned above would be required to identify outliers.
+
+**Note:** It can be interesting to calculate the proportion of variance explained by the RDA model and the individual RDA axes when conducting a GEA test (code available [here](https://popgen.nescent.org/2018-03-27_RDA_GEA.html)); however having a high proportion of variance explained is not required for GEA testing, which is focused on identifying outlier loci in the ordination space, not maximizing variance explained.
+
+For the lodgepole pine data, we will load the [rdadapt](XXX) function, described in Capblancq et al. (2018) and use it to conduct the genome scan.
+
+```{r, message=FALSE, results='hide', eval=TRUE}
+## Function rdadapt
+source("./src/rdadapt.R")
+
+## Running the function with K = 2
+rdadapt_env<-rdadapt(RDA_env, 2)
+```
+
+One critical step when conducting a genome scan is to set a pertinent p-value threshold to identify the outlier loci. Here, we used a Bonferroni correction to account for multiple testing.  
+
+**Note:** the rdadapt function returns both p-values and q-values, which means it is possible to use a FDR (False Discovery Rate) approach instead of a p-value threshold to identify outliers; see [Francois et al. 2015](https://onlinelibrary.wiley.com/doi/full/10.1111/mec.13513).
+
+```{r, message=FALSE, results='hide', eval=TRUE}
+## P-values threshold after Bonferroni correction
+thres_env <- 0.01/length(rdadapt_env$p.values)
+
+## Identifying the loci that are below the p-value threshold
+outliers <- data.frame(Loci = colnames(AllFreq)[which(rdadapt_env$p.values<thres_env)], p.value = rdadapt_env$p.values[which(rdadapt_env$p.values<thres_env)], contig = unlist(lapply(strsplit(colnames(AllFreq)[which(rdadapt_env$p.values<thres_env)], split = "_"), function(x) x[1])))
+```
+
+To avoid redundancy among loci that are in strong physical linkage along the genome we only kept the outlier locus with the lowest p-values for each genomic contig.  
+
+**Note:** To avoid linkage disequilibrium among loci, it is also possible to prune the dataset before running the genome scan. Here we preferred not to to be able to compare our top hit outliers with previously found adaptive loci that were searched for on a non-pruned dataset.
+
+```{r, message=FALSE, results='hide', eval=TRUE}
+## Top hit outlier per contig
+outliers <- outliers[order(outliers$contig, outliers$p.value),]
+
+## List of outlier names
+outliers_rdadapt_env <- as.character(outliers$Loci[!duplicated(outliers$contig)])
+```
+
+Once the outliers have been identified, it can be useful to visualize their distribution in comparison with neutral loci using either an RDA biplot or a Manhattan plot.
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE, fig.align='center'}
+## Formatting table for ggplot
+locus_scores <- scores(RDA_env, choices=c(1:2), display="species", scaling="none") # vegan references "species", here these are the loci
+TAB_loci <- data.frame(names = row.names(locus_scores), locus_scores)
+TAB_loci$type <- "Neutral"
+TAB_loci$type[TAB_loci$names%in%outliers$Loci] <- "All outliers"
+TAB_loci$type[TAB_loci$names%in%outliers_rdadapt_env] <- "Top outliers"
+TAB_loci$type <- factor(TAB_loci$type, levels = c("Neutral", "All outliers", "Top outliers"))
+TAB_loci <- TAB_loci[order(TAB_loci$type),]
+TAB_var <- as.data.frame(scores(RDA_env, choices=c(1,2), display="bp")) # pull the biplot scores
+
+## Biplot of RDA loci and variables scores
+ggplot() +
+  geom_hline(yintercept=0, linetype="dashed", color = gray(.80), size=0.6) +
+  geom_vline(xintercept=0, linetype="dashed", color = gray(.80), size=0.6) +
+  geom_point(data = TAB_loci, aes(x=RDA1*20, y=RDA2*20, colour = type), size = 1.4) +
+  scale_color_manual(values = c("gray90", "#F9A242FF", "#6B4596FF")) +
+  geom_segment(data = TAB_var, aes(xend=RDA1, yend=RDA2, x=0, y=0), colour="black", size=0.15, linetype=1, arrow=arrow(length = unit(0.02, "npc"))) +
+  geom_text(data = TAB_var, aes(x=1.1*RDA1, y=1.1*RDA2, label = row.names(TAB_var)), size = 2.5, family = "Times") +
+  xlab("RDA 1") + ylab("RDA 2") +
+  facet_wrap(~"RDA space") +
+  guides(color=guide_legend(title="Locus type")) +
+  theme_bw(base_size = 11, base_family = "Times") +
+  theme(panel.background = element_blank(), legend.background = element_blank(), panel.grid = element_blank(), plot.background = element_blank(), legend.text=element_text(size=rel(.8)), strip.text = element_text(size=11))
+
+## Manhattan plot
+Outliers <- rep("Neutral", length(colnames(AllFreq)))
+Outliers[colnames(AllFreq)%in%outliers$Loci] <- "All outliers"
+Outliers[colnames(AllFreq)%in%outliers_rdadapt_env] <- "Top outliers"
+Outliers <- factor(Outliers, levels = c("Neutral", "All outliers", "Top outliers"))
+TAB_manhatan <- data.frame(pos = 1:length(colnames(AllFreq)), 
+                           pvalues = rdadapt_env$p.values, 
+                           Outliers = Outliers)
+TAB_manhatan <- TAB_manhatan[order(TAB_manhatan$Outliers),]
+ggplot(data = TAB_manhatan) +
+  geom_point(aes(x=pos, y=-log10(pvalues), col = Outliers), size=1.4) +
+  scale_color_manual(values = c("gray90", "#F9A242FF", "#6B4596FF")) +
+  xlab("Loci") + ylab("-log10(p.values)") +
+  geom_hline(yintercept=-log10(thres_env), linetype="dashed", color = gray(.80), size=0.6) +
+  facet_wrap(~"Manhattan plot", nrow = 3) +
+  guides(color=guide_legend(title="Locus type")) +
+  theme_bw(base_size = 11, base_family = "Times") +
+  theme(legend.position="right", legend.background = element_blank(), panel.grid = element_blank(), legend.box.background = element_blank(), plot.background = element_blank(), panel.background = element_blank(), legend.text=element_text(size=rel(.8)), strip.text = element_text(size=11))
+```
+
+We identified 583 loci showing extreme association with the environment, reduced to a set of 183 unlinked outliers when retaining only the best hit for each genomic contig.
+
+<br>  
+
+<h4>4.2. Comparing outlier list to Mahony et al. (2020)</h4>  
+
+Among the 183 best hit outliers identified using pRDA (see above), 126 were also identified by Mahony et al. (2020) using Bayenv2, and a third (326) of the 865 loci identified with Bayenv2 were identified in the larger set of 583 RDA candidates.
+
+```{r, message=FALSE, results='hide', eval=TRUE}
+## Loading previously identified outliers
+outliers_mahony <- read.table("./Data/gea_outliers_by_env_Mahonyetal2020.txt", header = T, row.names = 1)
+outliers_mahony_env <- row.names(outliers_mahony)[apply(outliers_mahony[,3:21], 1, function(x) any(as.logical(x)))]
+list_outliers <- list(RDA_best = outliers_rdadapt_env, RDA_all = as.character(outliers$Loci), Bayenv2 = outliers_mahony_env)
+```
+```{r, message=FALSE, eval=TRUE, echo=FALSE, fig.align='center'}
+ggVennDiagram(list_outliers, category.names = c("RDA best hit", "RDA all", "Bayenv2"), lty="solid", color="black", size=0.2) + 
+  scale_fill_gradient2(low = "white", high = 'gray40') + guides(fill = FALSE) + theme(text = element_text(size=16, family = "Times"))
+```
+<br>  
+
+<h4>4.3. Not accounting for population structure</h4>  
+
+In this example, we accounted for population structure, as is commonly recommended when conducting genome scans; however, there are cases where this approach can be overly conservative. To investigate this issue in the lodgepole pine data, we compared the candidates identified with the partial RDA to those identified using a simple RDA.  
+
+```{r, message=FALSE, results='hide', eval=TRUE, fig.align='center'}
+## Running a simple RDA model
+RDA_env_unconstrained <- rda(AllFreq ~ MAR + EMT + MWMT + CMD + Tave_wt + DD_18 + MAP + Eref + PAS,  Variables)
+ 
+## Running the rdadapt function
+rdadapt_env_unconstrained <- rdadapt(RDA_env_unconstrained, 2)
+
+## Setting the p-value threshold 
+thres_env <- 0.01/length(rdadapt_env_unconstrained$p.values)
+
+## Identifying the outliers for the simple RDA
+outliers_unconstrained <- data.frame(Loci = colnames(AllFreq)[which(rdadapt_env_unconstrained$p.values<thres_env)], p.value = rdadapt_env_unconstrained$p.values[which(rdadapt_env_unconstrained$p.values<thres_env)], contig = unlist(lapply(strsplit(colnames(AllFreq)[which(rdadapt_env_unconstrained$p.values<thres_env)], split = "_"), function(x) x[1])))
+outliers_unconstrained <- outliers_unconstrained[order(outliers_unconstrained$contig, outliers_unconstrained$p.value),]
+outliers_rdadapt_env_unconstrained <- as.character(outliers_unconstrained$Loci[!duplicated(outliers_unconstrained$contig)])
+```
+
+We then compared the outliers identified when accounting or not for population structure.  
+
+```{r, message=FALSE, results='hide', eval=TRUE, fig.align='center'}
+## For all the outliers
+list_outliers_RDA_all <- list(RDA_constrained = as.character(outliers$Loci), RDA_unconstrained = as.character(outliers_unconstrained$Loci))
+ggVennDiagram(list_outliers_RDA_all, category.names = c("partial RDA", "simple RDA"), lty="solid", color="black", size=0.2) + 
+  scale_fill_gradient2(low = "white", high = 'gray40') + guides(fill = FALSE) + theme(text = element_text(size=16, family = "Times"))
+
+## Only for the top hit locus per contig
+list_outliers_RDA_top <- list(RDA_constrained = outliers_rdadapt_env, RDA_unconstrained = outliers_rdadapt_env_unconstrained)
+ggVennDiagram(list_outliers_RDA_top, category.names = c("partial RDA", "simple RDA"), lty="solid", color="black", size=0.2) + 
+  scale_fill_gradient2(low = "white", high = 'gray40') + guides(fill = FALSE) + theme(text = element_text(size=16, family = "Times"))
+```
+
+For all of the following RDA-based analyses we decided to retain only the 95 loci that were detected by both the partial RDA that accounted for population structure and by the simple RDA that did not account for population structure.
+
+```{r, message=FALSE, results='hide', eval=TRUE}
+common_outliers_RDA_top <- Reduce(intersect, list_outliers_RDA_top)
+```
+
+**Notes on interpretation and best practices:** We emphasize that there is no correct answer to the common dilemma of confounded variation in GEA, differentiation-based, and genome-wide association analyses. Instead, researchers must balance their tolerance for false negative and false positive rates, and use an analytical approach that best matches the objectives of the study as well as the potential ability to validate candidate loci. More generally, awareness of the tradeoffs associated with decisions such as population structure correction will allow users to appropriately interpret their results, both statistically and biologically. Decisions about if and how to correct for population structure, how to set outlier thresholds, and how to finalize a set of candidate adaptive markers will depend upon the objectives of the study and the data available (if any) for validation. The approach presented here is not meant to be applied without modification; modeling parameters (including what environmental predictors are used and how they are selected, see variable selection above) and other decisions should be determined based on the ecology of the organism, characteristics of the data set, and goals of the study.
+
+<br>  
+
+<h2>5. Adaptive landscape: projecting adaptive gradient(s) across space</h2>  
+<br>  
+
+<h4>5.1. Adaptively enriched genetic space</h4>  
+
+The 95 putative adaptive loci were used as multivariate response in a new “adaptively enriched” RDA, using the 9 selected bioclimate variables as explanatory variables. 
+
+```{r, message=FALSE, results='hide', eval=TRUE}
+## Adaptively enriched RDA
+RDA_outliers <- rda(AllFreq[,common_outliers_RDA_top] ~ MAR + EMT + MWMT + CMD + Tave_wt + DD_18 + MAP + Eref + PAS,  Variables)
+```
+
+An RDA biplot allows us to visualize the relationship between the 95 putative adaptive loci and the underlying climatic variables.  
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE, fig.align='center'}
+## RDA biplot
+TAB_loci <- as.data.frame(scores(RDA_outliers, choices=c(1:2), display="species", scaling="none"))
+TAB_var <- as.data.frame(scores(RDA_outliers, choices=c(1:2), display="bp"))
+ggplot() +
+  geom_hline(yintercept=0, linetype="dashed", color = gray(.80), size=0.6) +
+  geom_vline(xintercept=0, linetype="dashed", color = gray(.80), size=0.6) +
+  geom_point(data = TAB_loci, aes(x=RDA1*3, y=RDA2*3), colour = "#EB8055FF", size = 2, alpha = 0.8) + #"#F9A242FF"
+  geom_segment(data = TAB_var, aes(xend=RDA1, yend=RDA2, x=0, y=0), colour="black", size=0.15, linetype=1, arrow=arrow(length = unit(0.02, "npc"))) +
+  geom_text(data = TAB_var, aes(x=1.1*RDA1, y=1.1*RDA2, label = row.names(TAB_var)), size = 2.5, family = "Times") +
+  xlab("RDA 1 (67%)") + ylab("RDA 2 (21%)") +
+  facet_wrap(~"Adaptively enriched RDA space") +
+  guides(color=guide_legend(title="Locus type")) +
+  theme_bw(base_size = 11, base_family = "Times") +
+  theme(panel.grid = element_blank(), plot.background = element_blank(), panel.background = element_blank(), strip.text = element_text(size=11))
+```
+<br>  
+
+<h4>5.2. Adaptive index across the landscape</h4>  
+
+The scores of the environmental variables along the RDA axes can be used to calculate a genetic-based index of adaptation for each environmental pixel of the landscape. This index is estimated independently for each RDA axis of interest using the formula:
+$$
+\sum_{i = 1}^{n}{a_ib_i}
+$$
+Where _a_ is the climatic variable score (loading) along the RDA axis, _b_ is the standardized value for this particular variable at the focal pixel, and _i_ refers to one of the _n_ different variables used in the RDA model.   
+
+```{r, message=FALSE, results='hide', eval=TRUE}
+## Function to predict the adaptive index across the landscape
+source("./src/adaptive_index.R")
+
+## Running the function for all the climatic pixels of lodgepole pine distribution range
+res_RDA_proj_current <- adaptive_index(RDA = RDA_outliers, K = 2, env_pres = ras_6190, range = range, method = "loadings", scale_env = scale_env, center_env = center_env)
+```
+
+The adaptive index thus provides an estimate of adaptive genetic similarity or difference of all pixels on the landscape as a function of the values of the environmental predictors at that location. When projected on a map it allows visualizing the different adaptive gradients across a species range.
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE, fig.align='center', fig.width=10}
+## Vectorization of the climatic rasters for ggplot
+RDA_proj <- list(res_RDA_proj_current$RDA1, res_RDA_proj_current$RDA2)
+RDA_proj <- lapply(RDA_proj, function(x) rasterToPoints(x))
+for(i in 1:length(RDA_proj)){
+  RDA_proj[[i]][,3] <- (RDA_proj[[i]][,3]-min(RDA_proj[[i]][,3]))/(max(RDA_proj[[i]][,3])-min(RDA_proj[[i]][,3]))
+}
+
+## Adaptive genetic turnover projected across lodgepole pine range for RDA1 and RDA2 indexes
+TAB_RDA <- as.data.frame(do.call(rbind, RDA_proj[1:2]))
+colnames(TAB_RDA)[3] <- "value"
+TAB_RDA$variable <- factor(c(rep("RDA1", nrow(RDA_proj[[1]])), rep("RDA2", nrow(RDA_proj[[2]]))), levels = c("RDA1","RDA2"))
+ggplot(data = TAB_RDA) + 
+  geom_sf(data = admin, fill=gray(.9), size=0) +
+  geom_raster(aes(x = x, y = y, fill = cut(value, breaks=seq(0, 1, length.out=10), include.lowest = T))) + 
+  scale_fill_viridis_d(alpha = 0.8, direction = -1, option = "A", labels = c("Negative scores","","","","Intermediate scores","","","","Positive scores")) +
+  geom_sf(data = admin, fill=NA, size=0.1) +
+  coord_sf(xlim = c(-148, -98), ylim = c(35, 64), expand = FALSE) +
+  xlab("Longitude") + ylab("Latitude") +
+  guides(fill=guide_legend(title="Adaptive index")) +
+  facet_grid(~ variable) +
+  theme_bw(base_size = 11, base_family = "Times") +
+  theme(panel.grid = element_blank(), plot.background = element_blank(), panel.background = element_blank(), strip.text = element_text(size=11))
+```
+
+**Notes on interpretation and best practices:** We remind users that any prediction procedure such as this relies on the extrapolation of correlative relationships and carries potential pitfalls. Predicting any genetic-based adaptive index in unsampled areas could be strongly biased if the value or combination of the environmental predictors in those projected areas exceed those used to train the model. Similarly, any projection could be inaccurate if the genetic ~ environment relationship is not well characterized, either because the scale of the analyses (e.g., size of the pixel) does not capture the complexity of the association, or because the distribution of the identified genetic variation is not optimal across the current and/or future environmental landscape (e.g., due to recent demographic history, barriers to gene flow, genetic drift in small populations, fluctuating trait heritability, varying selection pressures, or genetic architecture). It is critical to avoid overinterpretation of adaptive index projections, especially when validation data are not available. 
+
+<br>  
+
+<h2>6. Predicting local maladaptation: genomic offset</h2>  
+<br>  
+
+<h4>6.1. Predicting future genomic offset</h4>  
+
+Once the genetic ~ environment relationship is characterized, it can be extrapolated to future environments to predict a potential shift in adaptive optimum induced by climate change.The RDA-based method to predict this future maladaptation is relatively simple. As done above, RDA can be used to predict the optimal adaptive genetic composition for each environmental pixel under consideration (Adaptive Index in Section 5), using both current and future environmental conditions. The difference between the two predictions provides an estimate of the change in genetic composition that would be required to track climate change.  
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE, fig.align='center', fig.width=10}
+## Function to predict genomic offset from a RDA model
+source("./src/genomic_offset.R")
+
+## Running the function for 2050 and 2080
+res_RDA_proj2080 <- genomic_offset(RDA_outliers, K = 2, env_pres = ras_6190, env_fut = ras_2080, range = range, method = "loadings", scale_env = scale_env, center_env = center_env)
+res_RDA_proj2050 <- genomic_offset(RDA_outliers, K = 2, env_pres = ras_6190, env_fut = ras_2050, range = range, method = "loadings", scale_env = scale_env, center_env = center_env)
+
+## Table global genetic offset predicted for 2050 and 2080
+RDA_proj_offset <- data.frame(rbind(rasterToPoints(res_RDA_proj2050$Proj_offset_global), rasterToPoints(res_RDA_proj2080$Proj_offset_global)), Date = c(rep("2050", nrow(rasterToPoints(res_RDA_proj2050$Proj_offset_global))), rep("2080", nrow(rasterToPoints(res_RDA_proj2080$Proj_offset_global)))))
+
+## Projecting genomic offset on a map
+colors <- c(colorRampPalette(brewer.pal(11, "Spectral")[6:5])(2), colorRampPalette(brewer.pal(11, "Spectral")[4:3])(2), colorRampPalette(brewer.pal(11, "Spectral")[2:1])(3))
+ggplot(data = RDA_proj_offset) + 
+  geom_sf(data = admin, fill=gray(.9), size=0) +
+  geom_raster(aes(x = x, y = y, fill = cut(Global_offset, breaks=seq(1, 8, by = 1), include.lowest = T)), alpha = 1) + 
+  scale_fill_manual(values = colors, labels = c("1-2","2-3","3-4","4-5","5-6","6-7","7-8"), guide = guide_legend(title="Genomic offset", title.position = "top", title.hjust = 0.5, ncol = 1, label.position="right"), na.translate = F) +
+  geom_sf(data = admin, fill=NA, size=0.1) +
+  coord_sf(xlim = c(-148, -98), ylim = c(35, 64), expand = FALSE) +
+  xlab("Longitude") + ylab("Latitude") +
+  facet_grid(~ Date) +
+  theme_bw(base_size = 11, base_family = "Times") +
+  theme(panel.grid = element_blank(), plot.background = element_blank(), panel.background = element_blank(), strip.text = element_text(size=11))
+```
+<br>  
+
+<h4>6.2. Predicting geographic genomic offset</h4>  
+
+A challenge associated with any predictive method is to find ways to validate the predictions. Here, we took advantage of the common garden experiment conducted in lodgepole pine to test our genomic offset predictions. We estimated a geographic genomic offset between the climate of each source population (based on the average between 1960 and 1990) and the climate of the garden where the seedlings were grown (in Vancouver, BC, Canada, averaging the years 2012 to 2015) and were then able to test the influence of the predicted genomic offset on the seedling fitness traits.  
+
+```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE, fig.align='center'}
+env <- row.names(scores(RDA_outliers, choices=c(1:2), display="bp"))
+
+## Environmental variables for the period the seedlings were growing in the common garden (2012-2015)
+env_garden <- read.table("./Data/ClimateData_VancouverGarden.csv", sep = ",", header = T)
+env_garden <- env_garden[, env]
+env_garden$MAR <- extract(ras_6190[[env]]$MAR, c(-123.250, 49.256))[2]
+env_garden <- as.data.frame(scale(env_garden, center = center_env[env], scale = scale_env[env]))
+env_garden <- colMeans(env_garden)
+
+## Environmental variables for the source populations between 61 and 90
+env_provenance <- data.frame(extract(ras_6190[[env]], Variables[,c("Longitude", "Latitude")]))
+env_provenance <- as.data.frame(scale(env_provenance, center_env[env], scale_env[env]))
+row.names(env_provenance) <- Variables[,"Population"]
+```
+
+Based on the adaptively enriched RDA space, we estimated a distance between each source population and the common garden climatic conditions. 
+
+```{r, message=FALSE, results='hide', eval=TRUE, fig.align='center'}
+## Function to estimate genetic offset between provenance and garden  
+source("./src/provgar_offset.R")
+
+## Running the provenance to garden genetic offset function
+provgar_offset <- provgar_offset(RDA = RDA_outliers, K = 2, env_garden = env_garden, env_provenance = env_provenance, weights = TRUE)
+```
+
+This geographic genomic offset can then be compared to different fitness traits in the garden to estimate the impact of this predicted maladaptation on seedling fitness. We can also compare the influence of genomic offset on fitness with the impact of a basic climate transfer distance estimated between each source population and the garden from the climatic variables only (using Mahalanobis distance).  
+
+```{r, message=FALSE, results='hide', eval=TRUE, fig.align='center'}
+## Climate distance between provenances and garden
+tabmaha <- as.data.frame(rbind(env_garden, env_provenance))
+mahaclim <- mahalanobis(as.matrix(tabmaha), center = as.numeric(tabmaha[1,]), cov = cov(as.matrix(tabmaha)))
+
+## Comparison climate transfer vs. genomic offset impact on fitness
+TAB_comp <- data.frame(x = rep(c(mahaclim[-1], provgar_offset[-1]), 2), y = c(rep(traits$Height, 2), rep(traits$GthRate, 2)), method = rep(rep(c("Climate", "Genetics"), each = nrow(traits)), 2), variable = rep(c("Final height", "Growth rate"), each = 2*nrow(traits)))
+ggplot(TAB_comp, aes(x=x, y=y)) +
+  geom_point(shape=19, size = 2, alpha = .7) +
+  geom_smooth(method = "lm", formula = y ~ x + I(x^2), size = 1) +
+  facet_grid(variable ~ method, scales = "free") +
+  ylab("Scaled fitness trait value") + 
+  xlab("Climate transfer distance                              Genomic offset") +
+  theme_bw(base_size = 12, base_family = "Times") +
+  theme(panel.grid = element_blank(), panel.background = element_blank())
+```
+```{r, message=TRUE, eval=TRUE}
+## Quadratic regression statistical testing
+summary(lm(traits$Height ~ poly(mahaclim[-1])))
+summary(lm(traits$Height ~ poly(provgar_offset[-1])))
+summary(lm(traits$GthRate ~ poly(mahaclim[-1])))
+summary(lm(traits$GthRate ~ poly(provgar_offset[-1])))
+```
+
+**Notes on interpretation and best practices:** We found that genomic offset better explained the decrease in height and growth rate than the basic climate transfer distance, which confirms the great potential of genomic offset for selecting source population for management or conservation plans. As with the adaptive index (previous section), when validation data are not available, it is critical to avoid overinterpretation of genomic offset projections given that they are based on statistical associations only.
